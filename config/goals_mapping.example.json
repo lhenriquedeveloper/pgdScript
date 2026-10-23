@@ -1,0 +1,55 @@
+{
+  "description": "Mapeamento opcional de repositórios/labels e chamados para as Metas do Plano de Trabalho do PGD",
+  "metas": {
+    "Meta 1: Sustentação e Manutenção de Sistemas Institucionais": {
+      "gitlab_projects": [
+        "atendemais-plugins",
+        "portal-uft",
+        "sie-integrador",
+        "suap-custom"
+      ],
+      "gitlab_labels": [
+        "sustentacao",
+        "bug",
+        "hotfix",
+        "suporte"
+      ],
+      "glpi_categories": [
+        "Sistemas",
+        "Correção de Erro",
+        "Acesso/Permissão"
+      ]
+    },
+    "Meta 2: Desenvolvimento e Modernização de Novas Funcionalidades": {
+      "gitlab_projects": [
+        "frotas-api",
+        "novo-portal",
+        "pgd-integrador",
+        "app-mobile"
+      ],
+      "gitlab_labels": [
+        "feature",
+        "melhoria",
+        "refactor",
+        "iniciativa"
+      ],
+      "glpi_categories": [
+        "Novo Módulo",
+        "Evolutivo"
+      ]
+    },
+    "Meta 3: Atendimento e Suporte Técnico Operacional": {
+      "gitlab_projects": [],
+      "gitlab_labels": [
+        "atendimento"
+      ],
+      "glpi_categories": [
+        "Dúvida",
+        "Configuração",
+        "Atendimento Geral"
+      ]
+    }
+  },
+  "default_glpi_meta": "Atividades Técnicas e Sustentação (AtendeMais)",
+  "default_gitlab_meta": "Desenvolvimento e Projetos (GitLab)"
+}
