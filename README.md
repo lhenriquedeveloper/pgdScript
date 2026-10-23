@@ -17,9 +17,10 @@ O script consome as APIs REST de ambas as ferramentas, correlaciona chamados com
 (git.uft.edu.br)
 ```
 
-- **GLPI (AtendeMais)**: Acesso via User Token + App Token gerados nas preferências do usuário. Conta com contingência automática para importação de relatórios em CSV (`--glpi-csv`).
-- **GitLab**: Acesso direto via Personal Access Token com escopo `read_api`.
-- **Processador Inteligente**: Detecta vínculos entre chamados e branches/MRs (ex: `fix/12345`), categoriza por metas do PGD e calcula estatísticas semanais.
+- **GLPI (AtendeMais)**: Filtra estritamente chamados onde **LUIS HENRIQUE SOUSA RODRIGUES** é **Atribuído** ou **Observador**, com status **Solucionado**, **Fechado** ou **Pendente (Aguardando Retorno do Cliente)**, extraindo automaticamente a descrição da ação/solução realizada.
+- **GitLab (git.uft.edu.br)**: Filtra issues com **Author Luis Henrique Sousa Rodrigues** (`luishenrique.sr`), incluindo em execução **somente** se vinculadas a uma **milestone** ativa/ongoing (mapeando o fluxo: *Análise*, *Desenvolvimento*, *Disponibilidade no Betas*, *Disponibilidade em Produção* com link clicável), e issues encerradas **somente** se fechadas naquela semana específica.
+- **Tarefa Fixa Semanal**: Inclui automaticamente em todo relatório a rotina fixa de **Extração semanal dos arquivos no SIAPE e upload dos dados no SUAP**.
+
 
 ---
 
