@@ -6,42 +6,51 @@ from pydantic import BaseModel, Field
 
 
 class GLPITicket(BaseModel):
-    """Representa um chamado extraído do GLPI (AtendeMais) via API ou CSV."""
+    """Representa um chamado do GLPI (AtendeMais)."""
     id: str
     title: str
-    status: str = "Resolvido"
+    status: str = "Solucionado"  # "Solucionado", "Fechado", "Pendente (Aguardando Retorno do Cliente)"
+    role: Literal["Atribuído", "Observador"] = "Atribuído"
     solved_date: Optional[datetime] = None
     closed_date: Optional[datetime] = None
+    modified_date: Optional[datetime] = None
     category: Optional[str] = None
     technician: Optional[str] = None
     url: Optional[str] = None
-    content_snippet: Optional[str] = None
+    description_summary: Optional[str] = None  # Pequena descrição do que foi feito no chamado
     time_spent_minutes: Optional[int] = None
     source: Literal["api", "csv"] = "api"
 
     @property
     def display_date_str(self) -> str:
-        dt = self.solved_date or self.closed_date
+        dt = self.solved_date or self.closed_date or self.modified_date
         if dt:
             return dt.strftime("%d/%m")
         return ""
 
 
 class GitLabIssue(BaseModel):
-    """Representa uma Issue do GitLab."""
+    """Representa uma Issue do GitLab criada por Luis Henrique."""
     id: int
     iid: int
     title: str
     project_name: str = ""
+    author_username: str = ""
     state: str = "opened"  # "opened" ou "closed"
     updated_at: Optional[datetime] = None
     closed_at: Optional[datetime] = None
     web_url: str = ""
     labels: List[str] = Field(default_factory=list)
+    milestone: Optional[Dict[str, Any]] = None
+    stage: Optional[str] = None  # "Análise", "Desenvolvimento", "Disponibilidade no Betas", "Disponibilidade em Produção"
+    is_ongoing: bool = False
+    closed_this_week: bool = False
 
     @property
-    def status_label(self) -> str:
-        return "Concluída" if self.state == "closed" else "Em andamento"
+    def milestone_title(self) -> Optional[str]:
+        if isinstance(self.milestone, dict):
+            return self.milestone.get("title")
+        return None
 
 
 class GitLabMergeRequest(BaseModel):
@@ -68,15 +77,20 @@ class GitLabMergeRequest(BaseModel):
 
 
 class ReportItem(BaseModel):
-    """Item consolidado e categorizado pronto para o relatório do PGD."""
-    source_type: Literal["glpi", "gitlab_issue", "gitlab_mr"]
-    identifier: str  # ex: "Chamado #12345", "Issue #45", "MR !12"
+    """Item consolidado e categorizado para o relatório do PGD."""
+    source_type: Literal["glpi", "gitlab_issue", "gitlab_mr", "fixed_routine"]
+    identifier: str  # ex: "Chamado #12345", "Issue #45", "MR !12", "Rotina Fixa"
     title: str
-    status_label: str  # ex: "Resolvido em 21/10", "Concluída", "Mesclado"
+    status_label: str  # ex: "Solucionado em 20/10", "Encerrada nesta semana em 19/10", "Em execução - Desenvolvimento"
     project_or_category: str = ""
     url: str = ""
-    linked_identifiers: List[str] = Field(default_factory=list)  # ex: ["MR !12", "fix/12345"]
-    meta_name: str = ""  # Nome da meta atribuída
+    role: Optional[str] = None  # "Atribuído" ou "Observador"
+    description: Optional[str] = None  # Pequena descrição do que foi feito
+    stage: Optional[str] = None  # Fluxo: Análise, Desenvolvimento, Betas, Produção
+    milestone_title: Optional[str] = None
+    linked_identifiers: List[str] = Field(default_factory=list)
+    meta_name: str = ""
+    is_fixed_routine: bool = False
 
 
 class ReportData(BaseModel):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import html
 import io
 import re
 from datetime import datetime
@@ -23,10 +24,13 @@ class GLPIClient:
         1: "Novo",
         2: "Em atendimento (atribuído)",
         3: "Em atendimento (planejado)",
-        4: "Pendente",
+        4: "Pendente (Aguardando Retorno do Cliente)",
         5: "Solucionado",
         6: "Fechado",
     }
+
+    # Status permitidos conforme especificação do usuário
+    ALLOWED_STATUSES = {4, 5, 6}
 
     def __init__(
         self,
@@ -41,6 +45,7 @@ class GLPIClient:
         self.user_id = user_id
         self.session_token: Optional[str] = None
         self._user_info: Dict[str, Any] = {}
+        self._http_client: Optional[httpx.Client] = None
 
     def _get_headers(self, with_session: bool = True) -> Dict[str, str]:
         headers: Dict[str, str] = {
@@ -53,8 +58,13 @@ class GLPIClient:
             headers["Session-Token"] = self.session_token
         return headers
 
+    def _client(self) -> httpx.Client:
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.Client(timeout=25.0)
+        return self._http_client
+
     def init_session(self) -> str:
-        """Inicia a sessão REST no GLPI e armazena o Session-Token."""
+        """Inicia a sessão REST no GLPI e obtém os dados do usuário conectado."""
         if not self.user_token:
             raise GLPIError(
                 "GLPI_USER_TOKEN não configurado. Defina a variável no .env ou passe o arquivo CSV."
@@ -64,33 +74,31 @@ class GLPIClient:
         headers = self._get_headers(with_session=False)
         headers["Authorization"] = f"user_token {self.user_token}"
 
+        client = self._client()
         try:
-            with httpx.Client(timeout=15.0) as client:
-                response = client.get(url, headers=headers)
-                if response.status_code == 401 or response.status_code == 400:
-                    raise GLPIError(
-                        f"Falha de autenticação no GLPI ({response.status_code}): "
-                        f"{response.text}. Verifique se o GLPI_USER_TOKEN e GLPI_APP_TOKEN estão corretos "
-                        "ou se a API REST está habilitada na sua instância do AtendeMais."
-                    )
-                response.raise_for_status()
-                data = response.json()
-                self.session_token = data.get("session_token")
-                if not self.session_token:
-                    raise GLPIError(f"Resposta inválida do GLPI (sem session_token): {data}")
-                
-                # Tenta recuperar dados do usuário da sessão atual
-                self._fetch_session_info(client)
-                return self.session_token
+            response = client.get(url, headers=headers)
+            if response.status_code in (400, 401):
+                raise GLPIError(
+                    f"Falha de autenticação no GLPI ({response.status_code}): {response.text}."
+                )
+            response.raise_for_status()
+            data = response.json()
+            self.session_token = data.get("session_token")
+            if not self.session_token:
+                raise GLPIError(f"Resposta inválida do GLPI (sem session_token): {data}")
+
+            # Busca informações do usuário conectado (ID 1872 etc)
+            self._fetch_session_info(client)
+            return self.session_token
         except httpx.RequestError as exc:
             raise GLPIError(
                 f"Não foi possível conectar ao GLPI em '{self.base_url}': {exc}.\n"
-                "Dica: Se a API estiver restrita a administradores, use a exportação CSV do sistema "
-                "com o comando: pgd-report --glpi-csv chamados.csv"
+                "Dica: Se a API estiver instável ou restrita, você pode exportar os chamados em CSV "
+                "no AtendeMais e usar: pgd --glpi-csv chamados.csv"
             )
 
     def _fetch_session_info(self, client: httpx.Client) -> None:
-        """Obtém os detalhes da sessão para descobrir o ID do técnico autenticado."""
+        """Descobre o ID e nome do usuário na sessão ativa."""
         try:
             url = f"{self.base_url}/getFullSession"
             res = client.get(url, headers=self._get_headers())
@@ -104,16 +112,16 @@ class GLPIClient:
 
     def kill_session(self) -> None:
         """Encerra a sessão ativa no GLPI."""
-        if not self.session_token:
-            return
-        url = f"{self.base_url}/killSession"
-        try:
-            with httpx.Client(timeout=10.0) as client:
-                client.get(url, headers=self._get_headers())
-        except Exception:
-            pass
-        finally:
-            self.session_token = None
+        if self.session_token and self._http_client and not self._http_client.is_closed:
+            try:
+                url = f"{self.base_url}/killSession"
+                self._http_client.get(url, headers=self._get_headers())
+            except Exception:
+                pass
+        self.session_token = None
+        if self._http_client and not self._http_client.is_closed:
+            self._http_client.close()
+            self._http_client = None
 
     def __enter__(self) -> GLPIClient:
         self.init_session()
@@ -127,160 +135,172 @@ class GLPIClient:
         since: datetime,
         until: Optional[datetime] = None
     ) -> List[GLPITicket]:
-        """Busca chamados solucionados ou fechados atribuídos ao técnico no período."""
+        """
+        Busca chamados onde LUIS HENRIQUE SOUSA RODRIGUES é Atribuído ou Observador.
+        Filtra estritamente por status: Solucionado (5), Fechado (6) ou Pendente (4).
+        """
         if not self.session_token:
             self.init_session()
 
+        client = self._client()
         headers = self._get_headers()
-        tickets: List[GLPITicket] = []
-        since_str = since.strftime("%Y-%m-%d %H:%M:%S")
+        user_id = self.user_id or "1872"
 
-        # 1. Estratégia direta via endpoint /Ticket com ordenação
-        url = f"{self.base_url}/Ticket"
-        params = {
-            "range": "0-150",
-            "sort": "date_mod",
+        # 1. Busca Ticket_User vinculados ao usuário
+        # type 2 = Atribuído (Técnico), type 3 = Observador
+        tu_url = f"{self.base_url}/Ticket_User"
+        tu_params = {
+            "searchText[users_id]": user_id,
+            "sort": "tickets_id",
             "order": "DESC",
+            "range": "0-60",
         }
 
         try:
-            with httpx.Client(timeout=20.0) as client:
-                response = client.get(url, headers=headers, params=params)
-                
-                # Se /Ticket padrão retornar 200 ou 206 (Partial Content)
-                if response.status_code in (200, 206):
-                    items = response.json()
-                    if isinstance(items, list):
-                        for item in items:
-                            ticket = self._parse_api_ticket(item, since, until)
-                            if ticket:
-                                tickets.append(ticket)
-                        return tickets
-
-                # 2. Estratégia alternativa via Search Engine do GLPI (/search/Ticket)
-                search_url = f"{self.base_url}/search/Ticket"
-                # Critério para tickets com status solucionado(5) ou fechado(6)
-                search_params = {
-                    "criteria[0][field]": "12",  # 12 = Status no GLPI
-                    "criteria[0][searchtype]": "equals",
-                    "criteria[0][value]": "5",
-                    "criteria[1][link]": "OR",
-                    "criteria[1][field]": "12",
-                    "criteria[1][searchtype]": "equals",
-                    "criteria[1][value]": "6",
-                    "range": "0-100",
-                    "order": "DESC",
-                    "sort": "19",  # 19 = Data de Modificação
-                }
-                search_res = client.get(search_url, headers=headers, params=search_params)
-                if search_res.status_code in (200, 206):
-                    data = search_res.json()
-                    rows = data.get("data", [])
-                    for row in rows:
-                        ticket = self._parse_search_row(row, since, until)
-                        if ticket:
-                            tickets.append(ticket)
-
+            tu_res = client.get(tu_url, headers=headers, params=tu_params)
+            if tu_res.status_code not in (200, 206):
+                return []
+            tu_items = tu_res.json()
+            if not isinstance(tu_items, list):
+                return []
         except httpx.RequestError as exc:
-            raise GLPIError(f"Erro ao consultar chamados no GLPI: {exc}")
+            raise GLPIError(f"Erro ao buscar vínculos de chamados no GLPI: {exc}")
+
+        # Filtra por papel: Atribuído (2) ou Observador (3)
+        relevant_tuples = []
+        for tu in tu_items:
+            role_type = tu.get("type")
+            if role_type in (2, 3):
+                role_name = "Atribuído" if role_type == 2 else "Observador"
+                relevant_tuples.append((str(tu["tickets_id"]), role_name))
+
+        tickets: List[GLPITicket] = []
+        seen_ids = set()
+
+        for ticket_id, role_name in relevant_tuples:
+            if ticket_id in seen_ids:
+                continue
+            seen_ids.add(ticket_id)
+
+            try:
+                ticket_res = client.get(f"{self.base_url}/Ticket/{ticket_id}", headers=headers)
+                if ticket_res.status_code != 200:
+                    continue
+                item = ticket_res.json()
+                status_code = int(item.get("status", 0))
+
+                # REGRA: Somente status Solucionado (5), Fechado (6) ou Pendente (4)
+                if status_code not in self.ALLOWED_STATUSES:
+                    continue
+
+                # Checagem de datas
+                date_mod_dt = self._parse_datetime(item.get("date_mod"))
+                solved_dt = self._parse_datetime(item.get("solvedate"))
+                closed_dt = self._parse_datetime(item.get("closedate"))
+
+                effective_dt = solved_dt or closed_dt or date_mod_dt
+                if not effective_dt:
+                    continue
+
+                # Filtro pelo período da semana
+                if effective_dt < since:
+                    continue
+                if until and effective_dt > until:
+                    continue
+
+                # Busca descrição do que foi feito no chamado
+                description = self._fetch_ticket_action_summary(client, headers, ticket_id, item)
+
+                status_label = self.STATUS_MAP.get(status_code, f"Status {status_code}")
+                base_front_url = self.base_url.replace("/apirest.php", "")
+                ticket_url = f"{base_front_url}/front/ticket.form.php?id={ticket_id}"
+
+                ticket = GLPITicket(
+                    id=ticket_id,
+                    title=item.get("name", f"Chamado #{ticket_id}").strip(),
+                    status=status_label,
+                    role=role_name,
+                    solved_date=solved_dt,
+                    closed_date=closed_dt,
+                    modified_date=date_mod_dt,
+                    category=str(item.get("itilcategories_id", "")) if item.get("itilcategories_id") else None,
+                    url=ticket_url,
+                    description_summary=description,
+                    source="api",
+                )
+                tickets.append(ticket)
+
+            except Exception:
+                continue
 
         return tickets
 
-    def _parse_api_ticket(
+    def _fetch_ticket_action_summary(
         self,
-        item: Dict[str, Any],
-        since: datetime,
-        until: Optional[datetime] = None
-    ) -> Optional[GLPITicket]:
-        """Interpreta um objeto de ticket vindo de /Ticket."""
-        solvedate_str = item.get("solvedate")
-        closedate_str = item.get("closedate")
-        date_mod_str = item.get("date_mod")
+        client: httpx.Client,
+        headers: Dict[str, str],
+        ticket_id: str,
+        ticket_data: Dict[str, Any],
+    ) -> str:
+        """
+        Extrai uma pequena descrição clara do que foi feito no chamado,
+        priorizando a solução ou o último followup registrado.
+        """
+        # 1. Tenta buscar ITILSolution
+        try:
+            sol_res = client.get(f"{self.base_url}/Ticket/{ticket_id}/ITILSolution", headers=headers)
+            if sol_res.status_code in (200, 206):
+                sols = sol_res.json()
+                if sols and isinstance(sols, list):
+                    last_sol = sols[-1].get("content")
+                    cleaned = self._clean_html(last_sol)
+                    if cleaned and not "encerrado devido a falta de retorno" in cleaned.lower():
+                        return cleaned[:200]
+        except Exception:
+            pass
 
-        solved_dt = self._parse_datetime(solvedate_str)
-        close_dt = self._parse_datetime(closedate_str)
-        mod_dt = self._parse_datetime(date_mod_str)
+        # 2. Tenta buscar ITILFollowup
+        try:
+            fol_res = client.get(f"{self.base_url}/Ticket/{ticket_id}/ITILFollowup", headers=headers)
+            if fol_res.status_code in (200, 206):
+                fols = fol_res.json()
+                if fols and isinstance(fols, list):
+                    # Procura último followup técnico ou com conteúdo real
+                    for f in reversed(fols):
+                        content = f.get("content", "")
+                        cleaned = self._clean_html(content)
+                        # Ignora mensagens automáticas de aviso
+                        if cleaned and "precisa de uma resposta para continuidade" not in cleaned.lower():
+                            return cleaned[:200]
+        except Exception:
+            pass
 
-        effective_dt = solved_dt or close_dt or mod_dt
-        if not effective_dt:
-            return None
+        # 3. Fallback: conteúdo/descrição inicial do chamado
+        raw_content = ticket_data.get("content", "")
+        cleaned_content = self._clean_html(raw_content)
+        if cleaned_content:
+            return cleaned_content[:180]
 
-        # Filtra pelo período
-        if effective_dt < since:
-            return None
-        if until and effective_dt > until:
-            return None
+        return "Atendimento realizado conforme solicitação."
 
-        status_code = item.get("status", 1)
-        # Prioriza tickets solucionados (5) ou fechados (6), mas aceita se tiver solvedate
-        if status_code not in (5, 6) and not solved_dt:
-            return None
-
-        status_name = self.STATUS_MAP.get(int(status_code), f"Status {status_code}")
-        ticket_id = str(item.get("id", ""))
-        title = item.get("name") or f"Chamado #{ticket_id}"
-
-        # Monta URL amigável para o chamado no GLPI
-        base_front_url = self.base_url.replace("/apirest.php", "")
-        ticket_url = f"{base_front_url}/front/ticket.form.php?id={ticket_id}"
-
-        return GLPITicket(
-            id=ticket_id,
-            title=title.strip(),
-            status=status_name,
-            solved_date=solved_dt,
-            closed_date=close_dt,
-            category=str(item.get("itilcategories_id", "")) if item.get("itilcategories_id") else None,
-            url=ticket_url,
-            content_snippet=str(item.get("content", ""))[:200] if item.get("content") else None,
-            source="api",
-        )
-
-    def _parse_search_row(
-        self,
-        row: Dict[str, Any],
-        since: datetime,
-        until: Optional[datetime] = None
-    ) -> Optional[GLPITicket]:
-        """Interpreta linha vinda de /search/Ticket."""
-        ticket_id = str(row.get("2", row.get("id", "")))
-        title = str(row.get("1", row.get("name", f"Chamado #{ticket_id}")))
-        status_val = row.get("12", "5")
-        
-        # 17 = solvedate, 16 = closedate, 19 = date_mod
-        solved_str = row.get("17") or row.get("solvedate")
-        close_str = row.get("16") or row.get("closedate")
-        mod_str = row.get("19") or row.get("date_mod")
-
-        solved_dt = self._parse_datetime(solved_str)
-        close_dt = self._parse_datetime(close_str)
-        mod_dt = self._parse_datetime(mod_str)
-
-        effective_dt = solved_dt or close_dt or mod_dt
-        if not effective_dt or effective_dt < since:
-            return None
-        if until and effective_dt > until:
-            return None
-
-        base_front_url = self.base_url.replace("/apirest.php", "")
-        ticket_url = f"{base_front_url}/front/ticket.form.php?id={ticket_id}"
-
-        return GLPITicket(
-            id=ticket_id,
-            title=title.strip(),
-            status="Solucionado" if str(status_val) == "5" else "Fechado",
-            solved_date=solved_dt,
-            closed_date=close_dt,
-            url=ticket_url,
-            source="api",
-        )
+    @staticmethod
+    def _clean_html(raw_html: Optional[str]) -> str:
+        """Remove tags HTML, decodifica entidades e normaliza espaços."""
+        if not raw_html:
+            return ""
+        # Decodifica entidades HTML como &#60; &nbsp; etc
+        text = html.unescape(raw_html)
+        # Remove tags HTML
+        text = re.sub(r"<[^>]+>", " ", text)
+        # Normaliza quebras de linha e múltiplos espaços
+        text = " ".join(text.split())
+        return text.strip()
 
     @staticmethod
     def _parse_datetime(val: Any) -> Optional[datetime]:
         """Converte strings de datas de formatos variados do GLPI para datetime."""
         if not val or not isinstance(val, str) or val in ("null", "None", ""):
             return None
-        
         formats = [
             "%Y-%m-%d %H:%M:%S",
             "%Y-%m-%dT%H:%M:%S",
@@ -304,8 +324,8 @@ class GLPIClient:
         until: Optional[datetime] = None
     ) -> List[GLPITicket]:
         """
-        Lê e extrai chamados a partir de um arquivo CSV exportado pelo frontend do GLPI.
-        Suporta automaticamente delimitadores (;, ,) e codificações (utf-8, latin-1).
+        Lê e extrai chamados do CSV garantindo os filtros de LUIS HENRIQUE SOUSA RODRIGUES
+        como Atribuído ou Observador, e status Solucionado, Fechado ou Pendente.
         """
         if not file_path.exists():
             raise FileNotFoundError(f"Arquivo CSV não encontrado: {file_path}")
@@ -322,15 +342,12 @@ class GLPIClient:
         if not text:
             raise GLPIError(f"Não foi possível decodificar o arquivo CSV '{file_path}'.")
 
-        # Tenta detectar dialeto do CSV
         sample = text[:4096]
         delimiter = ";" if ";" in sample and sample.count(";") > sample.count(",") else ","
-
         reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
         if not reader.fieldnames:
             raise GLPIError("Arquivo CSV vazio ou sem cabeçalhos válidos.")
 
-        # Identifica colunas flexivelmente
         col_map = cls._map_csv_columns(reader.fieldnames)
         tickets: List[GLPITicket] = []
 
@@ -343,11 +360,9 @@ class GLPIClient:
 
     @classmethod
     def _map_csv_columns(cls, fieldnames: List[str]) -> Dict[str, str]:
-        """Mapeia os nomes das colunas do CSV para chaves padronizadas."""
         mapping: Dict[str, str] = {}
         for col in fieldnames:
             clean = col.lower().strip()
-            # Remove acentos para comparação
             clean_ascii = re.sub(r"[áàãâä]", "a", clean)
             clean_ascii = re.sub(r"[éèêë]", "e", clean_ascii)
             clean_ascii = re.sub(r"[íìîï]", "i", clean_ascii)
@@ -355,22 +370,26 @@ class GLPIClient:
             clean_ascii = re.sub(r"[úùûü]", "u", clean_ascii)
             clean_ascii = re.sub(r"[ç]", "c", clean_ascii)
 
-            if clean_ascii in ("id", "chamado", "numero", "codigo", "id do chamado"):
+            if clean_ascii in ("id", "chamado", "numero", "codigo"):
                 mapping["id"] = col
-            elif any(k in clean_ascii for k in ["titulo", "title", "assunto", "nome", "descricao sumaria"]):
+            elif any(k in clean_ascii for k in ["titulo", "title", "assunto", "nome"]):
                 mapping["title"] = col
             elif "status" in clean_ascii or "situacao" in clean_ascii:
                 mapping["status"] = col
-            elif any(k in clean_ascii for k in ["solucao", "resolvido", "data solucao", "solucao em"]):
+            elif any(k in clean_ascii for k in ["solucao", "resolvido", "data solucao"]):
                 mapping["solved_date"] = col
             elif any(k in clean_ascii for k in ["fechamento", "fechado em", "data fechamento"]):
                 mapping["closed_date"] = col
-            elif any(k in clean_ascii for k in ["abertura", "data criacao", "data de abertura"]):
-                mapping["creation_date"] = col
-            elif any(k in clean_ascii for k in ["categoria", "categoria itil"]):
-                mapping["category"] = col
+            elif any(k in clean_ascii for k in ["modificacao", "data modificacao", "atualizacao"]):
+                mapping["modified_date"] = col
             elif any(k in clean_ascii for k in ["tecnico", "atribuido", "responsavel"]):
                 mapping["technician"] = col
+            elif "observador" in clean_ascii:
+                mapping["observer"] = col
+            elif any(k in clean_ascii for k in ["descricao", "solucao descricao", "detalhes"]):
+                mapping["description"] = col
+            elif "categoria" in clean_ascii:
+                mapping["category"] = col
         return mapping
 
     @classmethod
@@ -391,32 +410,47 @@ class GLPIClient:
         if not ticket_id or not title:
             return None
 
-        status_col = col_map.get("status")
-        status = (row.get(status_col) or "Resolvido").strip() if status_col else "Resolvido"
+        # REGRA: Somente se Luis Henrique for Atribuído ou Observador
+        tech_val = (row.get(col_map.get("technician", "")) or "").lower()
+        obs_val = (row.get(col_map.get("observer", "")) or "").lower()
 
-        solved_col = col_map.get("solved_date")
-        closed_col = col_map.get("closed_date")
-        cat_col = col_map.get("category")
-        tech_col = col_map.get("technician")
+        is_assigned = any(n in tech_val for n in ["luis henrique", "luishenrique", "1872"])
+        is_observer = any(n in obs_val for n in ["luis henrique", "luishenrique", "1872"])
 
-        solved_dt = cls._parse_datetime(row.get(solved_col)) if solved_col else None
-        closed_dt = cls._parse_datetime(row.get(closed_col)) if closed_col else None
-
-        effective_dt = solved_dt or closed_dt
-
-        # Filtro de data caso especificado
-        if since and effective_dt and effective_dt < since:
+        # Se existirem colunas de atribuído/observador no CSV e o usuário não estiver nelas, descarta
+        if (tech_val or obs_val) and not (is_assigned or is_observer):
             return None
-        if until and effective_dt and effective_dt > until:
+
+        role_name = "Observador" if (is_observer and not is_assigned) else "Atribuído"
+
+        # REGRA: Status Solucionado, Fechado ou Pendente
+        status_val = (row.get(col_map.get("status", "")) or "Solucionado").strip()
+        status_lower = status_val.lower()
+        if not any(s in status_lower for s in ["solucionad", "fechad", "pendent"]):
             return None
+
+        solved_dt = cls._parse_datetime(row.get(col_map.get("solved_date", "")))
+        closed_dt = cls._parse_datetime(row.get(col_map.get("closed_date", "")))
+        mod_dt = cls._parse_datetime(row.get(col_map.get("modified_date", "")))
+
+        eff_dt = solved_dt or closed_dt or mod_dt
+        if since and eff_dt and eff_dt < since:
+            return None
+        if until and eff_dt and eff_dt > until:
+            return None
+
+        desc_raw = row.get(col_map.get("description", "")) or ""
+        desc_summary = cls._clean_html(desc_raw)[:200] if desc_raw else "Atendimento realizado conforme solicitação."
 
         return GLPITicket(
             id=ticket_id,
             title=title,
-            status=status,
+            status=status_val,
+            role=role_name,
             solved_date=solved_dt,
             closed_date=closed_dt,
-            category=(row.get(cat_col) or "").strip() if cat_col else None,
-            technician=(row.get(tech_col) or "").strip() if tech_col else None,
+            modified_date=mod_dt,
+            category=(row.get(col_map.get("category", "")) or "").strip() if col_map.get("category") else None,
+            description_summary=desc_summary,
             source="csv",
         )

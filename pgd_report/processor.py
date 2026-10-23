@@ -15,8 +15,11 @@ from pgd_report.models import (
 class ReportProcessor:
     """Processa, cruza referências e categoriza itens do GLPI e GitLab para o PGD."""
 
-    # Expressão regular para encontrar referências a chamados (ex: #12345, chamado 12345, fix 12345)
     TICKET_REGEX = re.compile(r"(?:#|chamado|ticket|fix|fixes)[\s\-_:]*(\d{4,7})\b", re.IGNORECASE)
+
+    # Tarefa Fixa Semanal Obrigatória
+    FIXED_TASK_TITLE = "Extração semanal dos arquivos no SIAPE e upload dos dados no SUAP"
+    FIXED_TASK_DESC = "Rotina fixa de sustentação: extração e sincronização dos dados semanais do SIAPE para o SUAP."
 
     def __init__(self, mapping_config: Optional[Dict[str, Any]] = None):
         self.mapping_config = mapping_config or {}
@@ -36,20 +39,18 @@ class ReportProcessor:
         start_date: datetime,
         end_date: datetime,
     ) -> ReportData:
-        """Executa consolidação, cruzamento e mapeamento de metas."""
+        """Executa consolidação, cruzamento, inclusão da rotina fixa e mapeamento de metas."""
 
-        # Mapa de IDs de chamados encontrados nos MRs e Issues
+        # Cruzamento: Mapa de IDs de chamados encontrados nos MRs e Issues
         ticket_to_mrs: Dict[str, List[str]] = {}
         ticket_to_issues: Dict[str, List[str]] = {}
 
-        # 1. Analisa Merge Requests para detectar menções a chamados
         for mr in merge_requests:
             mr_ref = f"MR !{mr.iid}"
             found_ids = self._extract_ticket_ids(f"{mr.title} {mr.source_branch} {mr.target_branch}")
             for tid in found_ids:
                 ticket_to_mrs.setdefault(tid, []).append(mr_ref)
 
-        # 2. Analisa Issues para detectar menções a chamados
         for issue in issues:
             issue_ref = f"Issue #{issue.iid}"
             found_ids = self._extract_ticket_ids(f"{issue.title} {' '.join(issue.labels)}")
@@ -58,7 +59,20 @@ class ReportProcessor:
 
         items_by_meta: Dict[str, List[ReportItem]] = {}
 
-        # 3. Transforma Tickets em ReportItems
+        # 1. Tarefa Fixa Semanal: Extração SIAPE -> SUAP
+        fixed_item = ReportItem(
+            source_type="fixed_routine",
+            identifier="Rotina Fixa",
+            title=self.FIXED_TASK_TITLE,
+            status_label="Concluída",
+            project_or_category="SIAPE / SUAP",
+            description=self.FIXED_TASK_DESC,
+            meta_name=self.default_glpi_meta,
+            is_fixed_routine=True,
+        )
+        items_by_meta.setdefault(self.default_glpi_meta, []).append(fixed_item)
+
+        # 2. Chamados GLPI (AtendeMais)
         for ticket in tickets:
             meta = self._categorize_ticket(ticket)
             linked = []
@@ -68,7 +82,12 @@ class ReportProcessor:
                 linked.extend(ticket_to_issues[ticket.id])
 
             date_str = ticket.display_date_str
-            status_text = f"Resolvido em {date_str}" if date_str else ticket.status
+            if "pendente" in ticket.status.lower():
+                status_text = f"Pendente (Aguardando Retorno do Cliente{' em ' + date_str if date_str else ''})"
+            elif date_str:
+                status_text = f"{ticket.status} em {date_str}"
+            else:
+                status_text = ticket.status
 
             item = ReportItem(
                 source_type="glpi",
@@ -77,27 +96,42 @@ class ReportProcessor:
                 status_label=status_text,
                 project_or_category=ticket.category or "AtendeMais",
                 url=ticket.url or "",
+                role=ticket.role,
+                description=ticket.description_summary,
                 linked_identifiers=linked,
                 meta_name=meta,
             )
             items_by_meta.setdefault(meta, []).append(item)
 
-        # 4. Transforma GitLab Issues em ReportItems
+        # 3. GitLab Issues (Abertas com milestone / Fechadas na semana)
         for issue in issues:
             meta = self._categorize_gitlab_item(issue.project_name, issue.labels)
+
+            if issue.closed_this_week:
+                closed_dt_str = issue.closed_at.strftime("%d/%m") if issue.closed_at else ""
+                status_text = f"Encerrada nesta semana{' em ' + closed_dt_str if closed_dt_str else ''}"
+            elif issue.is_ongoing:
+                stage_label = issue.stage or "Desenvolvimento"
+                ms_info = f" / {issue.milestone_title}" if issue.milestone_title else ""
+                status_text = f"Em execução - {stage_label}{ms_info}"
+            else:
+                status_text = "Em andamento"
+
             item = ReportItem(
                 source_type="gitlab_issue",
                 identifier=f"Issue #{issue.iid}",
                 title=issue.title,
-                status_label=issue.status_label,
+                status_label=status_text,
                 project_or_category=issue.project_name,
                 url=issue.web_url,
+                stage=issue.stage,
+                milestone_title=issue.milestone_title,
                 linked_identifiers=[],
                 meta_name=meta,
             )
             items_by_meta.setdefault(meta, []).append(item)
 
-        # 5. Transforma GitLab Merge Requests em ReportItems
+        # 4. GitLab Merge Requests
         for mr in merge_requests:
             meta = self._categorize_gitlab_item(mr.project_name, mr.labels)
             item = ReportItem(
@@ -115,11 +149,13 @@ class ReportProcessor:
         # Estatísticas sumárias
         stats = {
             "total_tickets": len(tickets),
+            "tickets_atribuido": sum(1 for t in tickets if t.role == "Atribuído"),
+            "tickets_observador": sum(1 for t in tickets if t.role == "Observador"),
             "total_issues": len(issues),
-            "issues_concluidas": sum(1 for i in issues if i.state == "closed"),
+            "issues_encerradas_semana": sum(1 for i in issues if i.closed_this_week),
+            "issues_em_execucao": sum(1 for i in issues if i.is_ongoing),
             "total_mrs": len(merge_requests),
-            "mrs_mesclados": sum(1 for m in merge_requests if m.state == "merged"),
-            "total_entregas": len(tickets) + len(issues) + len(merge_requests),
+            "tarefa_fixa_siape_suap": True,
         }
 
         return ReportData(
@@ -133,12 +169,9 @@ class ReportProcessor:
         )
 
     def _extract_ticket_ids(self, text: str) -> Set[str]:
-        """Extrai números de chamados mencionados no texto ou branch."""
-        matches = self.TICKET_REGEX.findall(text)
-        return set(matches)
+        return set(self.TICKET_REGEX.findall(text))
 
     def _categorize_ticket(self, ticket: GLPITicket) -> str:
-        """Determina em qual meta do PGD o chamado do GLPI se encaixa."""
         if not self.metas_rules:
             return self.default_glpi_meta
 
@@ -154,7 +187,6 @@ class ReportProcessor:
         return self.default_glpi_meta
 
     def _categorize_gitlab_item(self, project_name: str, labels: List[str]) -> str:
-        """Determina em qual meta do PGD a issue ou MR do GitLab se encaixa."""
         if not self.metas_rules:
             return self.default_gitlab_meta
 
@@ -162,11 +194,9 @@ class ReportProcessor:
         labels_lower = [l.lower() for l in labels]
 
         for meta_name, rules in self.metas_rules.items():
-            # Checa correspondência por projeto
             for target_proj in rules.get("gitlab_projects", []):
                 if target_proj.lower() in proj_lower:
                     return meta_name
-            # Checa correspondência por labels
             for target_label in rules.get("gitlab_labels", []):
                 if target_label.lower() in labels_lower:
                     return meta_name

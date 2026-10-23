@@ -19,17 +19,21 @@ def test_cli_status():
 def test_cli_generate_with_csv(tmp_path):
     csv_file = tmp_path / "glpi_export.csv"
     csv_file.write_text(
-        "ID;Título;Status;Data de solução\n"
-        "9999;Ajuste emergencial em servidor;Solucionado;20/10/2026 10:00\n",
+        "ID;Título;Status;Data de solução;Técnico atribuído\n"
+        "9999;Ajuste emergencial em servidor;Solucionado;20/10/2026 10:00;Luis Henrique Sousa Rodrigues\n",
         encoding="utf-8"
     )
 
     output_file = tmp_path / "pgd_out.md"
     result = runner.invoke(
         app,
-        ["generate", "--glpi-csv", str(csv_file), "--output", str(output_file), "--no-preview"]
+        ["generate", "--glpi-csv", str(csv_file), "--output", str(output_file), "--no-preview"],
+        env={"GITLAB_TOKEN": "", "GITLAB_BASE_URL": "https://git.uft.edu.br/api/v4"}
     )
+
     assert result.exit_code == 0
     assert output_file.exists()
     content = output_file.read_text(encoding="utf-8")
-    assert "[Chamado #9999] Ajuste emergencial em servidor (Resolvido em 20/10)" in content
+    assert "[Chamado #9999] Ajuste emergencial em servidor" in content
+    assert "Solucionado em 20/10" in content
+    assert "Extração semanal dos arquivos no SIAPE e upload dos dados no SUAP" in content

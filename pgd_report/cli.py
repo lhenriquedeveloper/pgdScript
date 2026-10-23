@@ -58,7 +58,7 @@ def generate(
     output: Annotated[Optional[Path], typer.Option("--output", "-o", help="Salva o relatório no arquivo indicado.")] = None,
     copy: Annotated[bool, typer.Option("--copy", "-c", help="Copia o relatório gerado diretamente para a área de transferência.")] = False,
     fmt: Annotated[str, typer.Option("--format", "-f", help="Formato de saída: 'markdown', 'plain' ou 'json'.")] = "markdown",
-    with_links: Annotated[bool, typer.Option("--with-links", help="Inclui links web nos identificadores do Markdown.")] = False,
+    with_links: Annotated[bool, typer.Option("--with-links/--no-links", help="Inclui links web nos identificadores do Markdown.")] = True,
     with_header: Annotated[bool, typer.Option("--with-header", help="Inclui cabeçalho com período e resumo no relatório.")] = False,
     preview: Annotated[bool, typer.Option("--preview/--no-preview", help="Exibe preview estilizado no terminal.")] = True,
 ):

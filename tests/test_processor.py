@@ -9,14 +9,16 @@ def test_processor_links_ticket_with_mr_and_issue():
             id="12345",
             title="Correção de permissão de acesso ao módulo X",
             status="Solucionado",
+            role="Atribuído",
             solved_date=datetime(2026, 10, 21, 15, 30),
             category="Sistemas",
         ),
         GLPITicket(
             id="12389",
             title="Análise de inconsistência de dados na tabela Y",
-            status="Solucionado",
-            solved_date=datetime(2026, 10, 22, 10, 0),
+            status="Pendente (Aguardando Retorno do Cliente)",
+            role="Observador",
+            modified_date=datetime(2026, 10, 22, 10, 0),
             category="Sistemas",
         ),
     ]
@@ -28,6 +30,8 @@ def test_processor_links_ticket_with_mr_and_issue():
             title="Implementação de filtro de busca por demandante",
             project_name="sistemas/frotas",
             state="closed",
+            closed_this_week=True,
+            closed_at=datetime(2026, 10, 19, 14, 0),
             labels=["feature"],
         ),
         GitLabIssue(
@@ -36,6 +40,8 @@ def test_processor_links_ticket_with_mr_and_issue():
             title="Modelagem de novos relatórios de ocupação",
             project_name="sistemas/frotas",
             state="opened",
+            is_ongoing=True,
+            milestone={"title": "Sprint 4"},
             labels=["feature"],
         ),
     ]
@@ -63,10 +69,11 @@ def test_processor_links_ticket_with_mr_and_issue():
     )
 
     assert report.summary_stats["total_tickets"] == 2
+    assert report.summary_stats["tickets_atribuido"] == 1
+    assert report.summary_stats["tickets_observador"] == 1
     assert report.summary_stats["total_issues"] == 2
-    assert report.summary_stats["total_mrs"] == 1
-    assert report.summary_stats["issues_concluidas"] == 1
-    assert report.summary_stats["mrs_mesclados"] == 1
+    assert report.summary_stats["issues_encerradas_semana"] == 1
+    assert report.summary_stats["tarefa_fixa_siape_suap"] is True
 
     # Verifica se o chamado #12345 vinculou o MR !12
     glpi_items = report.items_by_meta["Atividades Técnicas e Sustentação (AtendeMais)"]
