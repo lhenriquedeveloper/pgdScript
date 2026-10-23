@@ -30,6 +30,9 @@ class ReportProcessor:
         self.default_gitlab_meta = self.mapping_config.get(
             "default_gitlab_meta", "Desenvolvimento e Projetos (GitLab)"
         )
+        self.extractor_meta = self.mapping_config.get(
+            "extractor_meta", self.default_gitlab_meta
+        )
 
     def process(
         self,
@@ -59,7 +62,7 @@ class ReportProcessor:
 
         items_by_meta: Dict[str, List[ReportItem]] = {}
 
-        # 1. Tarefa Fixa Semanal: Extração SIAPE -> SUAP
+        # 1. Tarefa Fixa Semanal: Extração SIAPE -> SUAP (Alocada em Desenvolvimento e Projetos)
         fixed_item = ReportItem(
             source_type="fixed_routine",
             identifier="Rotina Fixa",
@@ -67,10 +70,11 @@ class ReportProcessor:
             status_label="Concluída",
             project_or_category="SIAPE / SUAP",
             description=self.FIXED_TASK_DESC,
-            meta_name=self.default_glpi_meta,
+            meta_name=self.extractor_meta,
             is_fixed_routine=True,
         )
-        items_by_meta.setdefault(self.default_glpi_meta, []).append(fixed_item)
+        items_by_meta.setdefault(self.extractor_meta, []).append(fixed_item)
+
 
         # 2. Chamados GLPI (AtendeMais)
         for ticket in tickets:
