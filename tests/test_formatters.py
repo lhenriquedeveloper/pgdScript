@@ -82,3 +82,10 @@ def test_markdown_and_plain_formatters():
     assert "Extração semanal dos arquivos no SIAPE e upload dos dados no SUAP (Concluída)" in plain
     assert "Chamado #12345 [Atribuído]: Correção de permissão de acesso ao módulo X (Solucionado em 21/10)" in plain
     assert "Atendimento: Acesso regularizado ao perfil do servidor." in plain
+
+    from pgd_report.formatters import format_html
+    html_out = format_html(report)
+    assert '<a href="https://git.uft.edu.br/cds/frotas/issues/45"' in html_out
+    assert "Extração semanal dos arquivos no SIAPE e upload dos dados no SUAP" in html_out
+    assert "<ul>" in html_out
+

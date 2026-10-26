@@ -19,7 +19,7 @@ from pgd_report.models import GLPITicket, GitLabIssue, GitLabMergeRequest
 from pgd_report.clients.glpi_client import GLPIClient, GLPIError
 from pgd_report.clients.gitlab_client import GitLabClient, GitLabError
 from pgd_report.processor import ReportProcessor
-from pgd_report.formatters import format_markdown, format_plain
+from pgd_report.formatters import format_markdown, format_plain, format_html
 
 app = typer.Typer(
     name="pgd-report",
@@ -30,17 +30,29 @@ console = Console()
 err_console = Console(stderr=True)
 
 
-def copy_to_clipboard(text: str) -> bool:
+def copy_to_clipboard(text: str, is_html: bool = False) -> bool:
     """Tenta copiar o texto para o clipboard usando utilitários do sistema."""
-    commands = [
-        ["wl-copy"],
-        ["xclip", "-selection", "clipboard"],
-        ["xsel", "--clipboard", "--input"],
-        ["pbcopy"],
-    ]
+    import os
+    env = os.environ.copy()
+    user_local_bin = str(Path.home() / ".local" / "bin")
+    miniconda_bin = str(Path.home() / "miniconda3" / "bin")
+    env["PATH"] = f"{user_local_bin}:{miniconda_bin}:{env.get('PATH', '')}"
+
+    if is_html:
+        commands = [
+            ["wl-copy", "-t", "text/html"],
+            ["xclip", "-selection", "clipboard", "-target", "text/html"],
+        ]
+    else:
+        commands = [
+            ["wl-copy"],
+            ["xclip", "-selection", "clipboard"],
+            ["xsel", "--clipboard", "--input"],
+            ["pbcopy"],
+        ]
     for cmd in commands:
         try:
-            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, close_fds=True)
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, env=env, close_fds=True)
             proc.communicate(input=text.encode("utf-8"))
             if proc.returncode == 0:
                 return True
@@ -57,7 +69,8 @@ def generate(
     glpi_csv: Annotated[Optional[Path], typer.Option("--glpi-csv", help="Caminho para arquivo CSV exportado do AtendeMais (contingência se a API estiver desativada).")] = None,
     output: Annotated[Optional[Path], typer.Option("--output", "-o", help="Salva o relatório no arquivo indicado.")] = None,
     copy: Annotated[bool, typer.Option("--copy", "-c", help="Copia o relatório gerado diretamente para a área de transferência.")] = False,
-    fmt: Annotated[str, typer.Option("--format", "-f", help="Formato de saída: 'markdown', 'plain' ou 'json'.")] = "markdown",
+    copy_html: Annotated[bool, typer.Option("--copy-html", help="Copia o relatório em formato HTML (Rich Text) para colar com links clicáveis em editores web do PGD.")] = False,
+    fmt: Annotated[str, typer.Option("--format", "-f", help="Formato de saída: 'markdown', 'plain', 'html' ou 'json'.")] = "markdown",
     with_links: Annotated[bool, typer.Option("--with-links/--no-links", help="Inclui links web nos identificadores do Markdown.")] = True,
     with_header: Annotated[bool, typer.Option("--with-header", help="Inclui cabeçalho com período e resumo no relatório.")] = False,
     preview: Annotated[bool, typer.Option("--preview/--no-preview", help="Exibe preview estilizado no terminal.")] = True,
@@ -165,6 +178,13 @@ def generate(
         final_text = format_plain(report_data)
     elif fmt.lower() == "json":
         final_text = report_data.model_dump_json(indent=2)
+    elif fmt.lower() == "html":
+        final_text = format_html(
+            report_data,
+            include_header=with_header,
+            include_links=with_links,
+            include_stats=with_header,
+        )
     else:
         final_text = format_markdown(
             report_data,
@@ -176,8 +196,15 @@ def generate(
     # 6. Exibição / Preview
     if preview:
         console.print("\n")
-        if fmt.lower() == "markdown":
-            panel_content = Markdown(final_text)
+        if fmt.lower() == "markdown" or fmt.lower() == "html":
+            # Para o preview no terminal, exibe a visualização Markdown elegante
+            preview_md = format_markdown(
+                report_data,
+                include_header=with_header,
+                include_links=with_links,
+                include_stats=with_header,
+            )
+            panel_content = Markdown(preview_md)
         else:
             panel_content = final_text
         console.print(
@@ -190,13 +217,27 @@ def generate(
         )
 
     # 7. Cópia para Clipboard
-    if copy:
-        if copy_to_clipboard(final_text):
+    if copy_html or (copy and fmt.lower() == "html"):
+        html_content = format_html(
+            report_data,
+            include_header=with_header,
+            include_links=with_links,
+            include_stats=with_header,
+        )
+        if copy_to_clipboard(html_content, is_html=True):
+            console.print("[bold green]✔ Relatório copiado em Rich Text (HTML) para a área de transferência! (Ao colar em editores do PGD/SUAP, os links serão clicáveis)[/bold green]")
+        else:
+            console.print(
+                "[yellow]⚠ Não foi possível copiar automaticamente para o clipboard. "
+                "Certifique-se de que o xclip ou wl-copy está disponível.[/yellow]"
+            )
+    elif copy:
+        if copy_to_clipboard(final_text, is_html=False):
             console.print("[bold green]✔ Relatório copiado para a área de transferência![/bold green]")
         else:
             console.print(
                 "[yellow]⚠ Não foi possível copiar automaticamente para o clipboard. "
-                "Instale o utilitário 'xclip' (sudo apt install xclip) ou 'wl-copy'.[/yellow]"
+                "Certifique-se de que o xclip ou wl-copy está disponível.[/yellow]"
             )
 
     # 8. Salvamento em arquivo se solicitado

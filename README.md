@@ -81,38 +81,53 @@ pgd-report status
 
 ### 2. Gerar o relatório semanal padrão (últimos 7 dias)
 ```bash
-pgd-report generate
-```
-ou simplesmente:
-```bash
+pgd generate
+# ou simplesmente:
 pgd
 ```
 
-### 3. Copiar diretamente para a área de transferência
-```bash
-pgd --copy
-```
+### 3. Copiar com Links para Colar no PGD
 
-### 4. Salvar o relatório em arquivo Markdown
+Dependendo de como é o campo de texto do seu sistema PGD/SUAP:
+
+- **Para colar em editor visual (Rich Text / WYSIWYG) com links azuis clicáveis:**
+  ```bash
+  pgd generate --copy-html
+  ```
+  > *Dica: Ao pressionar Ctrl+V no editor do sistema, os títulos e links (`Issue #44`, `Chamado #19888`) já serão colados formatados com hiperlinks reais e clicáveis!*
+
+- **Para copiar em Markdown:**
+  ```bash
+  pgd generate --copy
+  # ou abreviado:
+  pgd generate -c
+  ```
+
+- **Para colar em campo de texto puro (sem suporte a Markdown, com URL por extenso):**
+  ```bash
+  pgd generate -c -f plain
+  ```
+
+### 4. Salvar o relatório em arquivo
 ```bash
-pgd --days 7 --output relatorio_semanal.md
+# Salvar em Markdown
+pgd generate --days 7 --output relatorio_semanal.md
+
+# Salvar em HTML
+pgd generate --format html --output relatorio_semanal.html
 ```
 
 ### 5. Consultar período específico (ex: quinzenal ou datas customizadas)
 ```bash
-pgd --since 2026-10-15 --until 2026-10-22
+pgd generate --since 2026-10-15 --until 2026-10-22
 ```
 
 ### 6. Contingência: Utilizar arquivo CSV exportado do AtendeMais
 Caso a API do GLPI não esteja acessível, basta exportar a busca de chamados em CSV no AtendeMais e rodar:
 ```bash
-pgd --glpi-csv chamados_semana.csv
+pgd generate --glpi-csv chamados_semana.csv
 ```
 
-### 7. Formato em texto puro (para sistemas sem suporte a Markdown)
-```bash
-pgd --format plain
-```
 
 ---
 
